@@ -5,6 +5,7 @@ graded relevance (Score); the include / maybe / exclude rule lives in code here.
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import xml.etree.ElementTree as ET
@@ -13,6 +14,7 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 MODEL = os.environ.get("TYPESAFE_MODEL", "jev-latest")
 KEYCHAIN_SERVICE = "typesafe-api-key"
@@ -20,6 +22,8 @@ CONCURRENCY = 8
 MAX_RETRIES = 5
 MAX_ABSTRACT_CHARS = 12000
 EFETCH_BATCH = 200
+MAX_SEARCH_RESULTS = 5000
+DEFAULT_RETURN = ("include", "maybe", "error")
 
 RELEVANCE_LEVELS = [
     "Different topic; does not concern the subject of the research question",
@@ -164,6 +168,24 @@ async def _screen(research_question: str, records: list[dict], inclusion: list[s
     }
 
 
+def _ncbi_params() -> dict:
+    key = os.environ.get("NCBI_API_KEY")
+    return {"api_key": key} if key else {}
+
+
+def _finalize(result: dict, return_decisions: list[str] | None, save_full_results_to: str | None) -> dict:
+    """Optionally save every result to a file, then return only the requested decisions."""
+    if save_full_results_to:
+        path = os.path.abspath(os.path.expanduser(save_full_results_to))
+        with open(path, "x", encoding="utf-8") as f:  # "x": never overwrite an existing file
+            json.dump(result, f, ensure_ascii=False, indent=1)
+        result = {**result, "full_results_file": path}
+    wanted = set(return_decisions or DEFAULT_RETURN)
+    result["returned_decisions"] = sorted(wanted)
+    result["results"] = [r for r in result["results"] if r["decision"] in wanted]
+    return result
+
+
 def _parse_pubmed_xml(xml_text: str) -> list[dict]:
     records = []
     for art in ET.fromstring(xml_text).iter("PubmedArticle"):
@@ -180,9 +202,7 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict]:
 
 
 async def _fetch_pubmed(pmids: list[str]) -> list[dict]:
-    params = {"db": "pubmed", "retmode": "xml"}
-    if os.environ.get("NCBI_API_KEY"):
-        params["api_key"] = os.environ["NCBI_API_KEY"]
+    params = {"db": "pubmed", "retmode": "xml", **_ncbi_params()}
     records = []
     async with httpx.AsyncClient(timeout=60) as client:
         for i in range(0, len(pmids), EFETCH_BATCH):
@@ -193,6 +213,68 @@ async def _fetch_pubmed(pmids: list[str]) -> list[dict]:
 
 
 @mcp.tool()
+async def search_and_screen(
+    pubmed_query: str,
+    research_question: str,
+    max_results: int = 500,
+    inclusion_criteria: list[str] | None = None,
+    exclusion_criteria: list[str] | None = None,
+    include_threshold: float = 0.7,
+    exclude_threshold: float = 0.3,
+    return_decisions: list[str] | None = None,
+    save_full_results_to: str | None = None,
+) -> dict:
+    """Run a PubMed search and judge every hit against the user's query / clinical question (CQ).
+
+    Search, abstract retrieval and judgement all happen server-side; only the decisions
+    come back. Use a broad, sensitive query - screening is cheap (hundreds of articles
+    in seconds) - and let the judgement do the narrowing.
+
+    Args:
+        pubmed_query: PubMed search expression (field tags, MeSH, boolean operators).
+            Put date, language and numeric limits here, e.g. ("2021/01/01"[dp] : "3000"[dp]);
+            Jev is unreliable with numbers and dates.
+        research_question: The user's query or CQ, as ONE self-contained sentence in ENGLISH
+            (Jev is most accurate in English and reads literally - translate Japanese input,
+            spell out abbreviations, avoid negations/double negatives).
+        max_results: Screen at most this many hits, taken in PubMed relevance order (max 5000).
+            Check "total_hits" against "screened" in the result to see whether hits were left out.
+        inclusion_criteria: Optional extra criteria, each a short positive English statement
+            (e.g. "The study is a randomized controlled trial"). An unmet criterion demotes
+            include to maybe; it never excludes, since abstracts often omit such details.
+        exclusion_criteria: Optional; a confidently met criterion excludes the article
+            (e.g. "The article is a case report").
+        include_threshold: match probability at or above which an article is included.
+        exclude_threshold: match probability at or below which an article is excluded.
+        return_decisions: Which groups to list in "results". Default ["include", "maybe", "error"];
+            "counts" always covers every article. Add "exclude" only for small batches.
+        save_full_results_to: Optional file path (.json). Every result, including excluded
+            articles, is written there so nothing is lost. Fails if the file already exists.
+    """
+    retmax = max(1, min(max_results, MAX_SEARCH_RESULTS))
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(ESEARCH_URL, data={
+            "db": "pubmed", "term": pubmed_query, "retmax": retmax, "retmode": "json",
+            "sort": "relevance", **_ncbi_params()})
+        resp.raise_for_status()
+    found = resp.json()["esearchresult"]
+    if "ERROR" in found:
+        raise ValueError(f"PubMed search failed: {found['ERROR']}")
+    pmids = found.get("idlist", [])
+    records = await _fetch_pubmed(pmids)
+    result = await _screen(research_question, records, inclusion_criteria or [], exclusion_criteria or [],
+                           include_threshold, exclude_threshold)
+    result = {
+        "pubmed_query": pubmed_query,
+        "query_translation": found.get("querytranslation", ""),
+        "total_hits": int(found.get("count", 0)),
+        "screened": len(records),
+        **result,
+    }
+    return _finalize(result, return_decisions, save_full_results_to)
+
+
+@mcp.tool()
 async def screen_pmids(
     research_question: str,
     pmids: list[str],
@@ -200,13 +282,15 @@ async def screen_pmids(
     exclusion_criteria: list[str] | None = None,
     include_threshold: float = 0.7,
     exclude_threshold: float = 0.3,
+    return_decisions: list[str] | None = None,
+    save_full_results_to: str | None = None,
 ) -> dict:
-    """Judge whether PubMed articles match the user's query / clinical question (CQ).
+    """Judge whether the given PubMed articles match the user's query / clinical question (CQ).
 
-    Titles and abstracts are fetched server-side from PubMed, so pass only PMIDs
-    (e.g. from a PubMed search tool) and keep abstracts out of the conversation.
-    Each article is evaluated by TypeSafe Jev and gets include / maybe / exclude
-    plus the underlying probabilities. Results are sorted by match probability.
+    Use this when you already have PMIDs; use search_and_screen to search and judge in one step.
+    Titles and abstracts are fetched server-side from PubMed, so abstracts stay out of the
+    conversation. Each article gets include / maybe / exclude plus the underlying
+    probabilities, sorted by match probability.
 
     Args:
         research_question: The user's query or CQ, as ONE self-contained sentence in ENGLISH
@@ -220,6 +304,10 @@ async def screen_pmids(
             (e.g. "The article is a case report").
         include_threshold: match probability at or above which an article is included.
         exclude_threshold: match probability at or below which an article is excluded.
+        return_decisions: Which groups to list in "results". Default ["include", "maybe", "error"];
+            "counts" always covers every article. Add "exclude" only for small batches.
+        save_full_results_to: Optional file path (.json). Every result, including excluded
+            articles, is written there so nothing is lost. Fails if the file already exists.
     """
     ids = [str(p).strip() for p in pmids if str(p).strip()]
     records = await _fetch_pubmed([p for p in ids if p.isdigit()])
@@ -227,7 +315,7 @@ async def screen_pmids(
                            include_threshold, exclude_threshold)
     found = {r["id"] for r in records}
     result["not_found"] = [p for p in ids if p not in found]
-    return result
+    return _finalize(result, return_decisions, save_full_results_to)
 
 
 @mcp.tool()
@@ -238,16 +326,19 @@ async def screen_records(
     exclusion_criteria: list[str] | None = None,
     include_threshold: float = 0.7,
     exclude_threshold: float = 0.3,
+    return_decisions: list[str] | None = None,
+    save_full_results_to: str | None = None,
 ) -> dict:
     """Same as screen_pmids, for articles that are not in PubMed (CiNii, arXiv, Embase exports...).
 
     Args:
         research_question: The user's query or CQ as one self-contained English sentence.
         records: List of {"id": str, "title": str, "abstract": str}. English text works best.
-        inclusion_criteria / exclusion_criteria / thresholds: see screen_pmids.
+        Other arguments: see screen_pmids.
     """
-    return await _screen(research_question, records, inclusion_criteria or [], exclusion_criteria or [],
-                         include_threshold, exclude_threshold)
+    result = await _screen(research_question, records, inclusion_criteria or [], exclusion_criteria or [],
+                           include_threshold, exclude_threshold)
+    return _finalize(result, return_decisions, save_full_results_to)
 
 
 def main() -> None:
