@@ -1,0 +1,11 @@
+[project]
+name = "typesafe-screening-mcp"
+version = "0.1.0"
+description = "MCP server: screen PubMed titles/abstracts against a query or CQ with TypeSafe Jev"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["mcp>=2", "httpx>=0.27"]
+
+[tool.uv]
+package = false
