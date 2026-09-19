@@ -19,7 +19,8 @@ Optional arguments for all tools:
 - `inclusion_criteria`, `exclusion_criteria` — lists of short English statements
 - `include_threshold` (default 0.7), `exclude_threshold` (default 0.3)
 - `return_decisions` — which groups to list in `results`; default `["include", "maybe", "error"]`. `counts` always covers every article, so a 300-hit search does not flood the conversation with excluded records.
-- `save_full_results_to` — path of a JSON file that receives every result, including excluded articles (for PRISMA-style records or a spreadsheet). An existing file is never overwritten.
+- `detailed` — `false` (default) returns one line per article, grouped by decision; `true` returns every probability per article (much longer).
+- `save_full_results_to` — path of a JSON file that receives every result, including excluded articles in full detail (for PRISMA-style records or a spreadsheet). An existing file is never overwritten.
 
 ### How an article is judged
 
@@ -36,7 +37,7 @@ The decision rule is plain code (`_decide` in `server.py`), tuned for sensitivit
 3. `match` ≥ include threshold → **include**, demoted to **maybe** if any inclusion criterion < 0.5 (abstracts often omit such details, so an unmet inclusion criterion never excludes)
 4. otherwise → **maybe**
 
-Results are sorted by `match`, and every probability is returned so you can re-threshold later.
+Results are sorted by `match`. The detailed output and the saved file keep every probability, so you can re-threshold later.
 
 ## Setup
 
@@ -88,7 +89,26 @@ Ask your assistant something like:
 
 The assistant writes the PubMed query and the English research question; the server does the rest. `search_and_screen` also returns `total_hits`, `screened` and PubMed's `query_translation`, so you can see whether `max_results` cut anything off.
 
-Example result item:
+Default (slim) result — one line per article, `PMID | match probability | title`, with the reason appended when a criterion or a missing abstract drove the decision:
+
+```json
+{
+  "total_hits": 15,
+  "screened": 15,
+  "counts": {"include": 8, "maybe": 5, "exclude": 2, "error": 0},
+  "results": {
+    "include": [
+      "41563136 | 0.98 | Real-Time Characterization of Colonic Polyps: A Multicenter Prospective Study Evaluating the CAD-EYE System in Screening"
+    ],
+    "maybe": [
+      "40375757 | 0.96 | Computer-aided diagnosis for colorectal polyp in comparison with endoscopists: Systematic review and meta-analysis. | inclusion criterion #1 not evident in abstract"
+    ],
+    "error": []
+  }
+}
+```
+
+With `detailed: true` (and always in the saved file), each article carries every probability:
 
 ```json
 {
@@ -132,7 +152,7 @@ This project is not affiliated with TypeSafe or NCBI. When using E-utilities, fo
 - `screen_pmids`: 手元に PMID がある場合はこちら。
 - `screen_records`: PubMed 以外（CiNii、arXiv など）の `{id, title, abstract}` を直接渡します。
 - 各文献に `include` / `maybe` / `exclude` と、根拠となる確率（CQ への一致、関連度、採択・除外基準ごとの確率）を返します。判定ルールはコードで固定されており、感度優先です（採択基準を満たさないだけでは除外せず `maybe` にします）。
-- 既定では `include` / `maybe` / `error` だけを返します（件数は全件分）。`return_decisions` で変更でき、`save_full_results_to` に JSON のパスを渡すと除外分を含む全結果をファイルに保存します。
+- 既定では `include` / `maybe` / `error` だけを、1 文献 1 行（`PMID | match | タイトル`）で返します（件数は全件分）。全確率が必要なら `detailed: true`。`return_decisions` で変更でき、`save_full_results_to` に JSON のパスを渡すと除外分を含む全結果をファイルに保存します。
 - API キーは環境変数 `TYPESAFE_API_KEY` か macOS キーチェーン（サービス名 `typesafe-api-key`）から読みます。
 - CQ と基準は**英語の肯定文**で渡してください（日本語で依頼すれば、呼び出し側の LLM が英訳して渡します）。数値・年の条件は PubMed の検索式側で絞るのが確実です。
 - 閾値は実データで較正していません。系統的レビューで使う場合は、既知の採択文献で感度を確認し、`maybe` と `exclude` の一部は人が確認してください。患者情報などの機密テキストは送らないでください。

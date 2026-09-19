@@ -173,17 +173,34 @@ def _ncbi_params() -> dict:
     return {"api_key": key} if key else {}
 
 
-def _finalize(result: dict, return_decisions: list[str] | None, save_full_results_to: str | None) -> dict:
+ROUTINE_REASONS = ("high match", "low match", "uncertain match")
+ECHOED_INPUTS = ("pubmed_query", "research_question")
+
+
+def _line(r: dict) -> str:
+    """One article per line: PMID | match | title, plus the reason when it is not routine."""
+    parts = [r["id"], f"{r['match']:.2f}" if "match" in r else "-", r["title"][:120]]
+    if r["reason"] not in ROUTINE_REASONS:
+        parts.append(r["reason"])
+    return " | ".join(parts)
+
+
+def _finalize(result: dict, return_decisions: list[str] | None, save_full_results_to: str | None,
+              detailed: bool) -> dict:
     """Optionally save every result to a file, then return only the requested decisions."""
     if save_full_results_to:
         path = os.path.abspath(os.path.expanduser(save_full_results_to))
         with open(path, "x", encoding="utf-8") as f:  # "x": never overwrite an existing file
             json.dump(result, f, ensure_ascii=False, indent=1)
         result = {**result, "full_results_file": path}
-    wanted = set(return_decisions or DEFAULT_RETURN)
-    result["returned_decisions"] = sorted(wanted)
-    result["results"] = [r for r in result["results"] if r["decision"] in wanted]
-    return result
+    wanted = [d for d in ("include", "maybe", "exclude", "error") if d in set(return_decisions or DEFAULT_RETURN)]
+    shown = [r for r in result["results"] if r["decision"] in wanted]
+    if detailed:
+        return {**result, "results": shown}
+    slim = {k: v for k, v in result.items() if k not in ECHOED_INPUTS}
+    slim["results_format"] = "PMID | match probability | title [| reason]"
+    slim["results"] = {d: [_line(r) for r in shown if r["decision"] == d] for d in wanted}
+    return slim
 
 
 def _parse_pubmed_xml(xml_text: str) -> list[dict]:
@@ -223,6 +240,7 @@ async def search_and_screen(
     exclude_threshold: float = 0.3,
     return_decisions: list[str] | None = None,
     save_full_results_to: str | None = None,
+    detailed: bool = False,
 ) -> dict:
     """Run a PubMed search and judge every hit against the user's query / clinical question (CQ).
 
@@ -249,7 +267,9 @@ async def search_and_screen(
         return_decisions: Which groups to list in "results". Default ["include", "maybe", "error"];
             "counts" always covers every article. Add "exclude" only for small batches.
         save_full_results_to: Optional file path (.json). Every result, including excluded
-            articles, is written there so nothing is lost. Fails if the file already exists.
+            articles, is written there in full detail. Fails if the file already exists.
+        detailed: False (default) returns one line per article, grouped by decision:
+            "PMID | match | title". True returns every probability per article (much longer).
     """
     retmax = max(1, min(max_results, MAX_SEARCH_RESULTS))
     async with httpx.AsyncClient(timeout=60) as client:
@@ -271,7 +291,7 @@ async def search_and_screen(
         "screened": len(records),
         **result,
     }
-    return _finalize(result, return_decisions, save_full_results_to)
+    return _finalize(result, return_decisions, save_full_results_to, detailed)
 
 
 @mcp.tool()
@@ -284,6 +304,7 @@ async def screen_pmids(
     exclude_threshold: float = 0.3,
     return_decisions: list[str] | None = None,
     save_full_results_to: str | None = None,
+    detailed: bool = False,
 ) -> dict:
     """Judge whether the given PubMed articles match the user's query / clinical question (CQ).
 
@@ -307,7 +328,9 @@ async def screen_pmids(
         return_decisions: Which groups to list in "results". Default ["include", "maybe", "error"];
             "counts" always covers every article. Add "exclude" only for small batches.
         save_full_results_to: Optional file path (.json). Every result, including excluded
-            articles, is written there so nothing is lost. Fails if the file already exists.
+            articles, is written there in full detail. Fails if the file already exists.
+        detailed: False (default) returns one line per article, grouped by decision:
+            "PMID | match | title". True returns every probability per article (much longer).
     """
     ids = [str(p).strip() for p in pmids if str(p).strip()]
     records = await _fetch_pubmed([p for p in ids if p.isdigit()])
@@ -315,7 +338,7 @@ async def screen_pmids(
                            include_threshold, exclude_threshold)
     found = {r["id"] for r in records}
     result["not_found"] = [p for p in ids if p not in found]
-    return _finalize(result, return_decisions, save_full_results_to)
+    return _finalize(result, return_decisions, save_full_results_to, detailed)
 
 
 @mcp.tool()
@@ -328,6 +351,7 @@ async def screen_records(
     exclude_threshold: float = 0.3,
     return_decisions: list[str] | None = None,
     save_full_results_to: str | None = None,
+    detailed: bool = False,
 ) -> dict:
     """Same as screen_pmids, for articles that are not in PubMed (CiNii, arXiv, Embase exports...).
 
@@ -338,7 +362,7 @@ async def screen_records(
     """
     result = await _screen(research_question, records, inclusion_criteria or [], exclusion_criteria or [],
                            include_threshold, exclude_threshold)
-    return _finalize(result, return_decisions, save_full_results_to)
+    return _finalize(result, return_decisions, save_full_results_to, detailed)
 
 
 def main() -> None:
