@@ -81,6 +81,20 @@ claude mcp add --scope user typesafe-screening -- \
 }
 ```
 
+## Optional: Claude Code skill
+
+`skills/literature-screening/` is a thin skill that tells Claude how to use this server well: turning a CQ into a literal-friendly English sentence, building a broad query, placing criteria on the inclusion or exclusion side, always saving the full results, and reporting `maybe` / `exclude` honestly. It also ships a script that turns a saved full-results file into an Excel workbook (Summary / Include / Maybe / Exclude sheets with author, year, journal, publication type, PubMed links and columns for human decisions). The skill text is in Japanese.
+
+```sh
+# install (symlink keeps it in sync with the repo)
+ln -s /path/to/typesafe-screening-mcp/skills/literature-screening ~/.claude/skills/literature-screening
+
+# Excel export on its own
+uv run skills/literature-screening/scripts/results_to_xlsx.py full_results.json screening.xlsx
+```
+
+The MCP server works without the skill; the skill needs the MCP server.
+
 ## Usage
 
 Ask your assistant something like:
@@ -153,6 +167,7 @@ This project is not affiliated with TypeSafe or NCBI. When using E-utilities, fo
 - `screen_records`: PubMed 以外（CiNii、arXiv など）の `{id, title, abstract}` を直接渡します。
 - 各文献に `include` / `maybe` / `exclude` と、根拠となる確率（CQ への一致、関連度、採択・除外基準ごとの確率）を返します。判定ルールはコードで固定されており、感度優先です（採択基準を満たさないだけでは除外せず `maybe` にします）。
 - 既定では `include` / `maybe` / `error` だけを、1 文献 1 行（`PMID | match | タイトル`）で返します（件数は全件分）。全確率が必要なら `detailed: true`。`return_decisions` で変更でき、`save_full_results_to` に JSON のパスを渡すと除外分を含む全結果をファイルに保存します。
+- `skills/literature-screening/` は Claude Code 用の薄いスキルです（CQ の英文化、検索式と基準の作り方、結果報告の手順、全結果 JSON を Excel にするスクリプト）。`~/.claude/skills/` にシンボリックリンクを張って使います。MCP 本体はスキルなしでも動きます。
 - API キーは環境変数 `TYPESAFE_API_KEY` か macOS キーチェーン（サービス名 `typesafe-api-key`）から読みます。
 - CQ と基準は**英語の肯定文**で渡してください（日本語で依頼すれば、呼び出し側の LLM が英訳して渡します）。数値・年の条件は PubMed の検索式側で絞るのが確実です。
 - 閾値は実データで較正していません。系統的レビューで使う場合は、既知の採択文献で感度を確認し、`maybe` と `exclude` の一部は人が確認してください。患者情報などの機密テキストは送らないでください。

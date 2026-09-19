@@ -161,6 +161,8 @@ async def _screen(research_question: str, records: list[dict], inclusion: list[s
     return {
         "model": MODEL,
         "research_question": research_question,
+        "inclusion_criteria": inclusion,
+        "exclusion_criteria": exclusion,
         "thresholds": {"include": include_threshold, "exclude": exclude_threshold},
         "counts": counts,
         "input_tokens": input_tokens,
@@ -174,7 +176,7 @@ def _ncbi_params() -> dict:
 
 
 ROUTINE_REASONS = ("high match", "low match", "uncertain match")
-ECHOED_INPUTS = ("pubmed_query", "research_question")
+ECHOED_INPUTS = ("pubmed_query", "research_question", "inclusion_criteria", "exclusion_criteria")
 
 
 def _line(r: dict) -> str:
